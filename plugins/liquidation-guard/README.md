@@ -34,7 +34,7 @@ enforced by construction and by tests you can run yourself.
 
 ```toml
 [[plugins.entries]]
-plugin = "liquidation-guard"
+name = "liquidation-guard"
 
 [plugins.entries.config]
 wallet       = "AcNSmd5CxwLs21TYUmhWt7CW2v159TdYRkvQxb1iBYRj"
@@ -43,9 +43,13 @@ watch_pct    = "25"
 warn_pct     = "15"
 critical_pct = "7"
 rpc_url      = "https://api.mainnet-beta.solana.com"
-max_repay_ui = "5000"
-max_deposit_ui = "5000"
+max_repay_ui = "5000"    # in the debt asset's own UI units (here: USDG)
+max_deposit_ui = "0.5"   # in the collateral asset's own UI units (here: cbBTC)
 ```
+
+The host's plugin-entry field is `name` — there is no `plugin` alias
+(`PluginEntryConfig` in `zeroclaw-config`), so a `plugin = …` key is silently
+ignored, the entry binds to the empty name, and the tool never registers.
 
 Requires the `config_read` and `http_client` permissions (declared in
 `manifest.toml`). The host hands the plugin a flat `string -> string` map under
