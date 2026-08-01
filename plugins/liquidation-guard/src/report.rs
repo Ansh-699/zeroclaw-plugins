@@ -118,7 +118,15 @@ fn signed_pct(fraction: f64) -> String {
 /// 0.05 renders as "0.0" — an amount nobody can act on. Six decimals covers
 /// every mint this plugin touches, and the trailing padding is trimmed so
 /// ordinary amounts still read as before (2553.2 stays "2553.2").
+///
+/// A non-finite amount renders as `n/a`, matching [`pct`]: `remedy::rank`
+/// divides by an oracle price to size every remedy, so an unbounded one would
+/// otherwise print "Repay inf USDG" — an instruction nobody can follow, and
+/// the same fabricated-number failure the health forecasts already suppress.
 fn amt(v: f64) -> String {
+    if !v.is_finite() {
+        return "n/a".to_string();
+    }
     let s = format!("{v:.6}");
     let trimmed = s.trim_end_matches('0');
     match trimmed.strip_suffix('.') {

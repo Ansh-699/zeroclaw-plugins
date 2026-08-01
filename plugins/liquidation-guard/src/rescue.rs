@@ -55,7 +55,7 @@ const ADVANCE_NONCE_ACCOUNT_TAG: u32 = 4;
 /// `collateral_token_program` account: Kamino's internal cToken
 /// (collateral) mint is always managed via the classic SPL Token program
 /// (only the underlying liquidity mint can be Token-2022) — a documented
-/// single-sample assumption — see the README's Design decisions section.
+/// single-sample assumption — see the README's Future work section.
 const TOKEN_PROGRAM_ID: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 
 /// Compute-unit ceiling for the priority-fee `SetComputeUnitLimit`

@@ -92,6 +92,41 @@ fn small_high_value_amounts_do_not_round_to_zero_or_up() {
     );
 }
 
+/// A non-finite remedy amount must render as `n/a`, never `inf`/`NaN`.
+///
+/// `remedy::rank` sizes every remedy by dividing a USD delta by an oracle
+/// price, so an unbounded amount is reachable from real inputs. `pct`
+/// already returned `n/a` for exactly this case while `amt` did not, so one
+/// report could print a guarded buffer beside an unguarded "Deposit inf SOL"
+/// — an instruction nobody can follow, and the fabricated number this
+/// plugin's forecasts are elsewhere careful to suppress.
+#[test]
+fn non_finite_amounts_render_as_not_available() {
+    for amount in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+        let remedy = Remedy {
+            kind: RemedyKind::Deposit,
+            ui_amount: amount,
+            resulting_ltv: 0.599,
+            resulting_buffer: 0.250,
+            needs_balance_ui: amount,
+            capped_by_max_repay: false,
+        };
+        let out = render_check(&meta(), &health(), &[remedy], "{}");
+        let line = out
+            .lines()
+            .find(|l| l.starts_with("Deposit "))
+            .expect("deposit remedy line");
+        assert!(
+            line.starts_with("Deposit n/a "),
+            "non-finite amount {amount} did not render as n/a: {line}"
+        );
+        assert!(
+            !line.contains("inf") && !line.contains("NaN"),
+            "raw float sentinel leaked into a remedy line: {line}"
+        );
+    }
+}
+
 #[test]
 fn tier_line_format() {
     let out = render_check(&meta(), &health(), &[], "snap-1");

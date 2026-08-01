@@ -581,7 +581,7 @@ made by `curl` outside the plugin — the plugin itself still has no
 
 | artifact                                | value |
 | ----------------------------------------- | ------- |
-| Release wasm artifact                     | `cargo build --locked --target wasm32-wasip2 --release` → 564,783 bytes (v0.2.0; +10,316 over the pre-audit build for the payload trust-boundary work — pubkey-shape validation, display sanitization, finiteness/range gates; on top of +19,768 over the pre-`overflow-checks` build for the integer trap paths and +627 for the `ui_to_native` scaling gate — the cost of not wrapping, not saturating, and not trusting the payload) |
+| Release wasm artifact                     | `cargo build --locked --target wasm32-wasip2 --release` → 564,935 bytes (v0.2.0; +10,468 over the pre-audit build for the payload trust-boundary work — pubkey-shape validation, display sanitization, finiteness/range gates; on top of +19,768 over the pre-`overflow-checks` build for the integer trap paths and +627 for the `ui_to_native` scaling gate — the cost of not wrapping, not saturating, and not trusting the payload) |
 | Live obligations/prices/reserve-metrics fetch | `api.kamino.finance`, same wallet/market as above, 2026-07-19 — all three parsed OK by the crate's own `kamino::parse_obligations`/`parse_prices`/`parse_reserves_metrics` (`live_obligations_parse`, `live_prices_parse`, `live_reserves_metrics_parse`) |
 | Live rescue tx build                      | same live payload + a live `getLatestBlockhash` from `https://api.mainnet-beta.solana.com` → a real unsigned repay tx via `guard::run` (`live_rescue_tx_builds`) |
 | `simulateTransaction` (curl, outside the plugin) | `POST https://api.mainnet-beta.solana.com` `{"sigVerify":false,"encoding":"base64"}` on that tx → all three `RefreshReserve` (SOL $75.93, cbBTC $64370.05, USDG $1.0000 — matching Kamino's own live oracle quotes) and `RefreshObligation` (borrow/deposit values matching the live obligation) succeeded on real mainnet state; `RepayObligationLiquidityV2` reached the token transfer and failed `InstructionError [4, {"Custom":1}]` — `insufficient funds`, expected for an unsigned, unfunded rescue tx. Confirms the built instruction sequence/accounts/discriminators are correct against live mainnet klend program state, not just the golden fixture. |
@@ -653,8 +653,8 @@ plumbing.
   that custody story and is out of scope for v1.1.
 - **Token-2022 collateral mints.** `build_deposit_tx`'s
   `collateral_token_program` account is hardcoded to the classic SPL Token
-  program (single empirical sample, a SOL reserve) — see this README's
-  Deviations section.
+  program (single empirical sample, a SOL reserve); a Token-2022 cToken mint
+  would need that account resolved from the reserve rather than pinned.
 - **More protocols.** Everything here is Kamino Lend-specific (`klend`
   program, Kamino REST API). The same tiered-warning/forecast/remedy shape
   generalizes to other Solana lending markets.
