@@ -30,6 +30,56 @@ plugin has no opinion on what happens after that. No security tier, audit, or
 certification is claimed anywhere in this document — the invariants below are
 enforced by construction and by tests you can run yourself.
 
+## What this does that a read-only monitor cannot
+
+A liquidation *monitor* answers one question — am I in danger? That is the
+easier half, and it is where an alert stops. The operator is still left to
+work out how much to repay, open a UI, assemble the transaction, and get it
+landed: at 3am, under time pressure, during exactly the congestion that
+created the danger. The February 2026 window above is the argument. Those
+30,030 wallets were not liquidated for lack of a dashboard; being told a few
+minutes earlier, with no remedy in hand, would not on its own have saved most
+of them.
+
+This plugin closes that gap without ever holding a key. Four consequences
+follow, and each is something an alert-only tool structurally cannot offer:
+
+**1. A remedy amount, not a risk score.** `remedy::rank` solves for the exact
+repay or deposit that restores the position to the `WATCH` boundary
+(`t = liq_ltv × (1 − watch)`), and reports the resulting LTV and buffer for
+each candidate. Never "just under the line": liquidation rounds repeat, so a
+remedy that leaves a position at the edge only buys time until the next one.
+A health factor hands that arithmetic — and its failure modes — to a human
+under stress.
+
+**2. The transaction itself.** `rescue` and `deposit` return the actual
+base64 legacy transaction: `refresh_reserve` per obligation reserve (target
+reserve last), `refresh_obligation`, then `repay_obligation_liquidity_v2` or
+`deposit_reserve_liquidity_and_obligation_collateral_v2`. Accounts,
+discriminators and PDAs are derived and cross-checked against the reserve's
+own account bytes, never guessed — a mismatch is a typed refusal. The result
+is byte-compared against two captured mainnet transactions
+(`tests/rescue_golden.rs`) and simulated against live klend program state
+(evidence table below).
+
+**3. It is built to land during the event it warns about.** Congestion is not
+an edge case here, it is the correlated cause: the same volatility that moves
+a position toward liquidation is what makes blockspace expensive and RPCs
+slow. `priority_fee_microlamports` prepends a compute-budget pair so a rescue
+can outbid the spike that is liquidating everyone else, and `nonce_account`
+replaces the ~60–90s blockhash with a durable nonce, so a transaction sitting
+in a human or multisig approval queue is still valid whenever it is finally
+signed. Both are opt-in and default off.
+
+**4. Doing more did not cost custody tier.** The plugin still holds no key
+material, has no signing path, and no broadcast-shaped RPC call anywhere in
+`src/`. The instruction set is closed to repay and deposit — both of which
+move funds *from* the operator's wallet *into* the operator's own position —
+so the worst case from a fully compromised model or a hostile API payload is
+a transaction the operator inspects and declines to sign. Withdraw, borrow
+and liquidate have no encoder at all, which is grep-checkable in this source
+(safety invariant 3).
+
 ## Install / config
 
 ```toml
@@ -118,19 +168,28 @@ otherwise fully stateless. `portfolio` keeps one `snapshot:` line per
 obligation section, so each obligation's prior state stays correctly scoped
 to itself.
 
-**Sample cron SOP** (illustrative — wire this into whatever your agent's
-scheduler is; scoped to a single obligation per persisted snapshot file — a
-`portfolio` caller tracking multiple obligations needs one snapshot file per
-obligation, since each `snapshot:` line is bound to the section above it):
+**Running it.** `kamino_guard` is a tool an agent calls — there is no
+`zeroclaw tool call` subcommand, and nothing here is driven from a shell.
+Install the component, fill in the `[plugins.entries.config]` block above,
+then schedule an agent prompt. This is the exact deployment behind the
+[operating record](#operating-record-real-zeroclaw-host) below:
 
 ```bash
-# every 5 minutes: check, then persist the returned snapshot for next time
-SNAP=$(cat /var/lib/zeroclaw/kamino_guard.snapshot 2>/dev/null || echo "")
-OUT=$(zeroclaw tool call kamino_guard \
-  "$(jq -n --arg s "$SNAP" '{action:"check", prev_snapshot:$s}')")
-echo "$OUT" | grep -oP 'snapshot: \K.*' > /var/lib/zeroclaw/kamino_guard.snapshot
-echo "$OUT" | grep -qE '^(WATCH|WARN|CRITICAL)' && notify-operator "$OUT"
+zeroclaw plugin install ./plugins/liquidation-guard
+
+zeroclaw cron add '*/20 * * * *' \
+  'Do a routine liquidation-watch check now: if the position is WARN or
+   CRITICAL, send me one concise alert with the liquidation price and the
+   cheapest remedy; if OK or WATCH, stay silent and send nothing.' \
+  --agent <your-agent-alias> --prompt
 ```
+
+The agent calls `kamino_guard` with `{"action":"check"}` and decides whether
+to notify. Snapshot round-tripping is optional and agent-managed: hand the
+previous call's `snapshot:` line back as `prev_snapshot` on the next call to
+get the drift and `PARAM ALERT` lines. A snapshot is bound to the obligation
+it was taken from, so a `portfolio` caller tracking several obligations needs
+one stored snapshot per obligation.
 
 ## Design decisions
 
@@ -569,9 +628,9 @@ of evidence the [table below](#evidence-table) leaves room for.
 | Reserve account-data fixture      | market `7u3HeHxYDLhnCoErrtycNokbQYbWGzLs6JSDqGAv5PfF`, 8 reserves (6 original + 2 added for the deposit golden's `refresh_obligation` remaining accounts) — `tests/fixtures/reserve_accounts.json` |
 | Malicious/injection fixture       | `tests/fixtures/malicious_obligations.json`                                                                |
 
-**Live run (integrate stage, 2026-07-19).** Not a `zeroclaw` host invocation
-(no host build was run) — real network calls against the actual endpoints
-this plugin uses, driving the actual `kamino::parse_*` / `guard::run` code
+**Live run (integrate stage, 2026-07-19).** Library-level, not a host
+invocation — real network calls against the actual endpoints this plugin
+uses, driving the actual `kamino::parse_*` / `guard::run` code
 paths from `tests/live_evidence.rs` — and, for the composed nonce+fee row,
 `tests/rescue_golden.rs::live_nonce_fee_tx_builds` (all `#[ignore]`d, run
 explicitly, no network access in the normal `cargo test` gate), plus a
@@ -601,6 +660,28 @@ This table is otherwise scoped to what's captured and pinned in
 `tests/fixtures/` (rows above); the live rows do not replace those
 committed fixtures or their tests.
 
+### Operating record (real ZeroClaw host)
+
+The rows above exercise the library. This one is the component running as a
+plugin inside a real `zeroclaw` daemon, on a cron, watching a real Kamino
+position — the deployment described under
+[Install / config](#install--config).
+
+| artifact | value |
+| ---------- | ------- |
+| Host | `zeroclaw daemon` as a systemd user service, WASM plugin runtime enabled; component loaded from `~/.zeroclaw/plugins/liquidation-guard/` under the `config_read` + `http_client` grants in `manifest.toml` |
+| Schedule | `*/20 * * * *`, agent prompt — alert only on `WARN`/`CRITICAL`, stay silent otherwise |
+| Successful `check` completions | **190**, first `2026-07-24T08:25:33Z`, latest `2026-08-03T09:10:18Z` |
+| Where that number comes from | the plugin's own structured-log success emission (`liquidation_guard::tool::execute`, `PluginAction::Complete`, `PluginOutcome::Success` — see `src/lib.rs`), counted in the daemon log. It is the host recording the component, not this README asserting it. |
+| Continuity | seven operating days inside that window (Jul 24–27, Aug 1–3). The host was down or rate-limited for the remainder, so this is an operating record, not an uptime claim. |
+| Position watched | obligation `HcrU9nyaBFmhNPrxnwXRjreVxdQTZdq2dpvktjsWiS4J` on the main market — the same wallet as the evidence table above |
+
+On a `2026-08-03` capture of that obligation, `refreshedStats` put it at
+`LTV 73.3%` against a `79.9%` liquidation threshold — an 8.2% buffer, which
+is `WARN` under the default thresholds, on $60,083 of borrow against $81,930
+of liquidatable deposit. The position this plugin watches is genuinely inside
+the band it was written for, not a synthetic fixture.
+
 ## What fought us on wasip2
 
 - **No wall clock.** `wit/v0` declares no clock interface, and the built
@@ -610,15 +691,58 @@ committed fixtures or their tests.
   cannot yield a date.) `now` for the staleness check therefore comes from the
   prices response's own HTTP `Date` header, parsed by a hand-rolled RFC-1123
   parser (`src/kamino.rs::http_date_to_unix`) — no `chrono` dependency.
-- **No `getrandom` allowed.** Proven by `cargo tree --target wasm32-wasip2 -i
-  getrandom` returning "did not match any packages" (reproduced above under
-  [Safety invariants](#safety-invariants)). This ruled out `solana-sdk` and any
-  crate that pulls it in transitively, which is why PDA derivation
-  (`find_program_address`) is hand-rolled from `sha2` + `curve25519-dalek`'s
-  off-curve check instead. (The component does import
+- **No `getrandom` in the tree.** Proven by `cargo tree --target wasm32-wasip2
+  -i getrandom` returning "did not match any packages" (reproduced above under
+  [Safety invariants](#safety-invariants)). PDA derivation
+  (`find_program_address`) is therefore hand-rolled from `sha2` +
+  `curve25519-dalek`'s off-curve check. (The component does import
   `wasi:random/insecure-seed`: that is Rust `std` seeding its `HashMap`
   hasher, not this crate reaching for entropy — no key, nonce, or address in
   this plugin is ever derived from randomness.)
+
+### The `solana-*` crates on wasip2: measured, not assumed
+
+An earlier version of this README claimed `getrandom` "ruled out `solana-sdk`
+and any crate that pulls it in transitively". That was stale, and re-measuring
+it on the stock toolchain (Rust 1.96.1) gives a more useful answer — one that
+splits into two independent findings:
+
+| crate | `wasm32-wasip2` | `getrandom` in tree |
+| ------- | ----------------- | --------------------- |
+| `solana-hash` | compiles | none |
+| `solana-pubkey` | compiles | `v0.2.17` |
+| `solana-instruction` | compiles | `v0.2.17` |
+| `solana-message` | compiles | `v0.2.17` |
+| `solana-sdk` | compiles | `v0.1.16` + `v0.2.17` |
+| **`solana-transaction`** | **fails to compile** | — |
+
+**First: compiling is not the same as adoptable here.** Four of the five
+modular crates build fine, and so does `solana-sdk` — but each one puts
+`getrandom` back in the dependency tree, which safety invariant 7 forbids.
+Declining them is a policy choice this plugin makes deliberately, not a
+capability it lacks. `solana-hash` is the one that is clean on both axes.
+
+**Second: the crate that serializes transactions is the one that does not
+build.** `solana-transaction v2.2.3` fails on `wasm32-wasip2`:
+
+```
+error[E0599]: no method named `message_data` found for reference `&Transaction`
+error[E0599]: no method named `partial_sign` found for mutable reference `&mut Transaction`
+```
+
+It gates a browser module on `#[cfg(target_arch = "wasm32")]`
+(`src/lib.rs:113`, `:213`), and `wasm32-wasip2` *is* `target_arch = "wasm32"` —
+so the wasm-bindgen JS-glue path is compiled for a non-browser target and calls
+methods that do not exist there. `default-features = false` does not avoid it.
+
+That is the surprise at the component boundary worth writing down, and it lands
+exactly on transaction serialization — which is why `rescue::serialize_legacy_tx`,
+the compact-u16 shortvec encoder, and the base64 codec are hand-rolled here
+rather than taken from a crate. Reproduce in one command:
+
+```sh
+cargo add solana-transaction@2 && cargo build --target wasm32-wasip2
+```
 
 ### Component surface
 
