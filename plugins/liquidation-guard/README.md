@@ -722,27 +722,44 @@ modular crates build fine, and so does `solana-sdk` — but each one puts
 Declining them is a policy choice this plugin makes deliberately, not a
 capability it lacks. `solana-hash` is the one that is clean on both axes.
 
-**Second: the crate that serializes transactions is the one that does not
-build.** `solana-transaction v2.2.3` fails on `wasm32-wasip2`:
+**Second: the crate that serializes transactions is the one that misbehaves.**
+`solana-transaction v2.2.3` on its default features does not build for
+`wasm32-wasip2` at all:
 
 ```
 error[E0599]: no method named `message_data` found for reference `&Transaction`
 error[E0599]: no method named `partial_sign` found for mutable reference `&mut Transaction`
 ```
 
-It gates a browser module on `#[cfg(target_arch = "wasm32")]`
-(`src/lib.rs:113`, `:213`), and `wasm32-wasip2` *is* `target_arch = "wasm32"` —
-so the wasm-bindgen JS-glue path is compiled for a non-browser target and calls
-methods that do not exist there. `default-features = false` does not avoid it.
+It gates a `wasm-bindgen` browser module on `#[cfg(target_arch = "wasm32")]`
+(`src/lib.rs:113`, `:213`). `wasm32-wasip2` *is* `target_arch = "wasm32"`, so
+that JS-glue path gets compiled for a non-browser target, where it calls two
+methods only the `bincode` feature provides. `default-features = false` does not
+help — the gate is on the architecture, not on a feature.
+
+Enabling `features = ["bincode"]` (or `["blake3"]`, which implies it) *does*
+compile. It is still the wrong answer here, for two reasons: it pulls
+`getrandom` back into the tree, and it emits a `wasm-bindgen` browser shim into
+a WASI component that has no JavaScript host to bind to. The gate is simply too
+wide — browser wasm is `target_os = "unknown"` while both WASI targets are
+`target_os = "wasi"`, so the correct upstream cfg is:
+
+```rust
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+```
+
+Reproduce the whole thing in three commands:
+
+```sh
+cargo add solana-transaction@2 && cargo build --target wasm32-wasip2   # fails
+cargo add solana-transaction@2 --features bincode                      # compiles,
+cargo tree --target wasm32-wasip2 -i getrandom                         # but pulls getrandom
+```
 
 That is the surprise at the component boundary worth writing down, and it lands
 exactly on transaction serialization — which is why `rescue::serialize_legacy_tx`,
 the compact-u16 shortvec encoder, and the base64 codec are hand-rolled here
-rather than taken from a crate. Reproduce in one command:
-
-```sh
-cargo add solana-transaction@2 && cargo build --target wasm32-wasip2
-```
+rather than taken from a crate.
 
 ### Component surface
 
