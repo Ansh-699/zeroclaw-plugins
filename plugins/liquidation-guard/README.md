@@ -671,10 +671,31 @@ position — the deployment described under
 | ---------- | ------- |
 | Host | `zeroclaw daemon` as a systemd user service, WASM plugin runtime enabled; component loaded from `~/.zeroclaw/plugins/liquidation-guard/` under the `config_read` + `http_client` grants in `manifest.toml` |
 | Schedule | `*/20 * * * *`, agent prompt — alert only on `WARN`/`CRITICAL`, stay silent otherwise |
-| Successful `check` completions | **190**, first `2026-07-24T08:25:33Z`, latest `2026-08-03T09:10:18Z` |
-| Where that number comes from | the plugin's own structured-log success emission (`liquidation_guard::tool::execute`, `PluginAction::Complete`, `PluginOutcome::Success` — see `src/lib.rs`), counted in the daemon log. It is the host recording the component, not this README asserting it. |
-| Continuity | seven operating days inside that window (Jul 24–27, Aug 1–3). The host was down or rate-limited for the remainder, so this is an operating record, not an uptime claim. |
+| Successful `check` completions | **242** of 243 started, first `2026-07-24T08:25:33Z`, latest `2026-08-04T13:50:11Z` |
+| Tier split | **141 `WATCH` → 0 alerts. 101 `WARN` → 101 alerts.** 0 `CRITICAL`, 0 `OK`. The position crossed the `WATCH`/`WARN` boundary repeatedly during the window, so this is the gate actually switching, not a static position that happened to sit on one side of it. |
+| Alert delivery | 102 `send_message_to_peer` completions. 101 pair one-to-one with the `WARN` results above, each delivered ~5 s after the check returned (`WARN` at `2026-08-01T12:10:09Z` → delivered `12:10:14Z`, and so on). The 102nd is a channel-setup message at `2026-08-01T07:01:49Z`, hours before that day's first `WARN`. |
+| Cadence | median gap between consecutive completions is exactly `00:20:00` across 228 consecutive pairs — the cron firing on schedule, measured rather than assumed |
+| Where those numbers come from | the plugin's own structured-log success emission (`liquidation_guard::tool::execute`, `PluginAction::Complete`, `PluginOutcome::Success` — see `src/lib.rs`) plus the host's own `tool_call_result` records, counted in the daemon log. It is the host recording the component, not this README asserting it. |
+| Continuity | eight operating days inside that window (Jul 24–27, Aug 1–4), with the machine off overnight and a 4 d 16 h outage from `2026-07-27T20:10:10Z` to `2026-08-01T12:10:09Z`. This is an operating record, not an uptime claim. |
+| Known failures | 6 host-level `failure` outcomes in the window. Two are runs where the agent reported the tool absent: a disk cleanup had deleted the daemon binary, leaving a dangling symlink and a service stuck in `activating`. Rebuilding with `--features plugins-wasm-cranelift` — the plugin runtime is **not** in the default feature set — restored it. Recorded here rather than trimmed out. |
 | Position watched | obligation `HcrU9nyaBFmhNPrxnwXRjreVxdQTZdq2dpvktjsWiS4J` on the main market — the same wallet as the evidence table above |
+
+Every figure in that table is a `grep` away from being checked against the raw
+daemon log:
+
+```bash
+grep -c 'kamino_guard check completed'        daemon.log   # 242
+grep 'tool_call_result' daemon.log | grep -c 'WATCH — buffer'          # 141
+grep 'tool_call_result' daemon.log | grep -c 'WARN — buffer'           # 101
+grep 'tool_call_result' daemon.log | grep -c 'send_message_to_peer'    # 102
+```
+
+The `141 → 0` line is the one worth checking first. The agent runs unattended
+at full autonomy with exactly two tools available to it (`kamino_guard` and
+`send_message_to_peer`, pinned in the `guard` risk profile — no shell, no
+arbitrary HTTP, delegation forbidden). It stayed silent through 141 `WATCH`
+results and messaged on all 101 `WARN` results, without a miss in either
+direction.
 
 On a `2026-08-03` capture of that obligation, `refreshedStats` put it at
 `LTV 73.3%` against a `79.9%` liquidation threshold — an 8.2% buffer, which
