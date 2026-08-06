@@ -220,6 +220,20 @@ fn injected_rpc_url_arg_rejected() {
     assert!(err.contains("rpc_url"));
 }
 
+/// The parser and the advertised `parameters_schema` enum must agree: an
+/// action the schema offers but the parser rejects is a tool call the model
+/// will make and always fail.
+#[test]
+fn every_advertised_action_parses() {
+    for action in ["check", "portfolio", "rescue", "deposit", "capacity"] {
+        let raw = format!(r#"{{"action":"{action}"}}"#);
+        assert!(
+            parse_call(&raw).is_ok(),
+            "advertised action '{action}' failed to parse"
+        );
+    }
+}
+
 #[test]
 fn action_outside_enum_rejected() {
     let raw = r#"{"action":"nuke"}"#;

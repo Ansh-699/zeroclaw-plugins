@@ -219,6 +219,102 @@ fn deposit_args(config: serde_json::Value, extra: serde_json::Value) -> String {
     obj.to_string()
 }
 
+fn capacity_args(config: serde_json::Value) -> String {
+    serde_json::json!({
+        "action": "capacity",
+        "wallet": WALLET,
+        "__config": config,
+    })
+    .to_string()
+}
+
+/// A wallet that holds far more than either remedy needs reports both as
+/// affordable and names the cheaper one in the verdict.
+#[test]
+fn capacity_reports_affordable() {
+    let mut t = rescue_transport(1_000_000.0);
+    let out = run(&capacity_args(serde_json::json!({})), &mut t);
+    assert!(out.success, "expected success, got: {}", out.text);
+    assert!(
+        out.text.contains("AFFORDABLE"),
+        "expected an affordable remedy: {}",
+        out.text
+    );
+    assert!(
+        out.text.contains("Verdict: affordable now"),
+        "missing verdict: {}",
+        out.text
+    );
+    assert!(
+        !out.text.contains("SHORT"),
+        "a funded wallet must not report a shortfall: {}",
+        out.text
+    );
+}
+
+/// The whole point of the action: a wallet that cannot cover the remedy is
+/// told the size of the gap, not just that it is short.
+#[test]
+fn capacity_reports_shortfall_with_amount() {
+    let mut t = rescue_transport(1.0);
+    let out = run(&capacity_args(serde_json::json!({})), &mut t);
+    assert!(out.success, "expected success, got: {}", out.text);
+    assert!(
+        out.text.contains("SHORT"),
+        "expected a shortfall: {}",
+        out.text
+    );
+    assert!(
+        out.text.contains("wallet holds"),
+        "shortfall must state what is actually held: {}",
+        out.text
+    );
+    assert!(
+        out.text.contains("Verdict:"),
+        "missing verdict: {}",
+        out.text
+    );
+}
+
+/// An unreadable balance must render as unknown. Rendering it as zero would
+/// claim the owner can afford nothing, which is a lie that would suppress a
+/// remedy they can in fact take.
+#[test]
+fn capacity_unreadable_balance_is_unknown_not_zero() {
+    let mut t = MockTransport::new()
+        .route_dated("/oracles/prices", 200, PRICES_JSON, FRESH_DATE)
+        .route("/obligations", 200, OBLIGATIONS_JSON)
+        .route("/reserves/metrics", 200, RESERVES_METRICS_JSON)
+        .route("/reserves/account-data", 200, account_data_body())
+        .route("getTokenAccountBalance", 500, "upstream unavailable");
+    let out = run(&capacity_args(serde_json::json!({})), &mut t);
+    assert!(out.success, "expected success, got: {}", out.text);
+    assert!(
+        out.text.contains("wallet balance unknown"),
+        "expected an unknown balance: {}",
+        out.text
+    );
+    assert!(
+        !out.text.contains("SHORT"),
+        "an unreadable balance must never render as a shortfall: {}",
+        out.text
+    );
+}
+
+/// `capacity` is read-only. It must never emit a transaction, and therefore
+/// must never carry the custody sentence that belongs to one.
+#[test]
+fn capacity_builds_no_transaction() {
+    let mut t = rescue_transport(1_000_000.0);
+    let out = run(&capacity_args(serde_json::json!({})), &mut t);
+    assert!(out.success, "expected success, got: {}", out.text);
+    assert!(
+        !out.text.contains("tx (base64)") && !out.text.contains("Nothing here can sign"),
+        "capacity must not produce a transaction: {}",
+        out.text
+    );
+}
+
 #[test]
 fn check_happy_path() {
     let mut t = happy_transport();

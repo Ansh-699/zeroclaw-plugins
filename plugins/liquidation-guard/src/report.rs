@@ -88,6 +88,99 @@ pub struct DepositText {
     pub nonce_account: Option<String>,
 }
 
+/// One remedy's affordability: what it asks for against what the wallet holds.
+pub struct CapacityRow {
+    /// Repay remedy when true, deposit remedy when false.
+    pub is_repay: bool,
+    pub symbol: String,
+    /// Wallet balance the remedy requires, ui units.
+    pub needs_ui: f64,
+    /// Wallet balance actually read. `None` = could not be read, which is
+    /// reported as unknown and never rendered as zero.
+    pub held_ui: Option<f64>,
+    pub resulting_buffer: f64,
+    pub capped_by_max_repay: bool,
+}
+
+/// Renders the `capacity` answer: for each remedy, what it needs, what the
+/// wallet holds, and the shortfall. Builds nothing and signs nothing, so it
+/// deliberately carries no custody sentence — there is no transaction here to
+/// attach one to.
+pub fn render_capacity(collateral_symbol: &str, debt_symbol: &str, rows: &[CapacityRow]) -> String {
+    if rows.is_empty() {
+        return format!(
+            "No remedy needed — the position is at or above the WATCH threshold.\n\
+             Nothing to afford. (collateral {collateral_symbol}, debt {debt_symbol})\n"
+        );
+    }
+
+    let mut out = String::new();
+    let mut affordable: Vec<&CapacityRow> = Vec::new();
+
+    for r in rows {
+        let verb = if r.is_repay { "Repay" } else { "Deposit" };
+        match r.held_ui {
+            Some(held) if held + f64::EPSILON >= r.needs_ui => {
+                affordable.push(r);
+                out.push_str(&format!(
+                    "{verb} {needs} {sym} → buffer {buf} — AFFORDABLE (wallet holds {held_s})\n",
+                    needs = amt(r.needs_ui),
+                    sym = r.symbol,
+                    buf = pct(r.resulting_buffer),
+                    held_s = amt(held),
+                ));
+            }
+            Some(held) => {
+                out.push_str(&format!(
+                    "{verb} {needs} {sym} → buffer {buf} — SHORT {short} {sym} \
+                     (wallet holds {held_s})\n",
+                    needs = amt(r.needs_ui),
+                    sym = r.symbol,
+                    buf = pct(r.resulting_buffer),
+                    short = amt(r.needs_ui - held),
+                    held_s = amt(held),
+                ));
+            }
+            None => out.push_str(&format!(
+                "{verb} {needs} {sym} → buffer {buf} — wallet balance unknown \
+                 (could not read the token account)\n",
+                needs = amt(r.needs_ui),
+                sym = r.symbol,
+                buf = pct(r.resulting_buffer),
+            )),
+        }
+        if r.capped_by_max_repay {
+            out.push_str(
+                "  note: this amount is capped by max_repay_ui, so it does NOT restore \
+                 the WATCH boundary.\n",
+            );
+        }
+    }
+
+    // The verdict line exists so the caller never has to compare the rows
+    // itself — an agent that misreads two rows sends a wrong alert.
+    match affordable.len() {
+        0 => out.push_str("Verdict: neither remedy is affordable from this wallet right now.\n"),
+        _ => {
+            let cheapest = affordable
+                .iter()
+                .min_by(|a, b| {
+                    a.needs_ui
+                        .partial_cmp(&b.needs_ui)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .expect("affordable is non-empty");
+            out.push_str(&format!(
+                "Verdict: affordable now — {verb} {needs} {sym}.\n",
+                verb = if cheapest.is_repay { "repay" } else { "deposit" },
+                needs = amt(cheapest.needs_ui),
+                sym = cheapest.symbol,
+            ));
+        }
+    }
+    out
+}
+
 /// Custody invariant: rescue/deposit output always carries this sentence
 /// verbatim — the single copy both [`render_rescue`] and [`render_deposit`]
 /// reference (never duplicated as a second string literal).

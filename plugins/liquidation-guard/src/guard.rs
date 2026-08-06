@@ -86,7 +86,31 @@ fn run_inner(raw_args: &str, transport: &mut dyn Transport) -> Result<String, St
         Action::Portfolio => run_portfolio(&call, transport),
         Action::Rescue => run_rescue(&call, transport),
         Action::Deposit => run_deposit(&call, transport),
+        Action::Capacity => run_capacity(&call, transport),
     }
+}
+
+/// Best-effort wallet balance for one mint, in ui units.
+///
+/// Every failure along the path — ATA derivation, transport error, non-200,
+/// JSON-RPC error object, malformed body — collapses to `None`. A balance
+/// reading is *never* fatal to its caller: `rescue`/`deposit` treat it as one
+/// cap candidate among several, and `capacity` reports it as unknown rather
+/// than blocking the answer. The single copy all three call sites share, so
+/// the "any failure is None" contract cannot drift between them.
+fn wallet_balance_ui(
+    transport: &mut dyn Transport,
+    rpc_url: &str,
+    wallet: &str,
+    mint: &str,
+    token_program: &str,
+) -> Option<f64> {
+    let ata = rescue::derive_ata(wallet, mint, token_program).ok()?;
+    let resp = transport
+        .fetch(&net::rpc_get_token_account_balance(rpc_url, &ata))
+        .ok()?;
+    net::check_response(&resp).ok()?;
+    net::parse_token_balance_response(&resp.body).ok()
 }
 
 /// Issues one `ApiCall`, checking the response and naming the endpoint
@@ -569,6 +593,132 @@ fn run_check(call: &ParsedCall, transport: &mut dyn Transport) -> Result<String,
     )
 }
 
+/// `capacity` — can this wallet actually afford either remedy?
+///
+/// `check` sizes the two ways out but says nothing about whether the owner
+/// holds the tokens to take them, so a WARN alert can name a 5,000 USDG repay
+/// against a wallet holding 1,200. This action reads the wallet's real balance
+/// for both remedy tokens and reports the shortfall.
+///
+/// Read-only and transaction-free: it reuses the `check` pipeline plus the
+/// reserve-account fetch (for the mint/token-program pair each ATA derivation
+/// needs), and never touches the builders in `rescue.rs`. A balance that cannot
+/// be read is reported as unknown — never silently as zero, which would read as
+/// "you can afford nothing".
+fn run_capacity(call: &ParsedCall, transport: &mut dyn Transport) -> Result<String, String> {
+    let wallet = resolve_wallet(call)?;
+    let market = resolve_market(call);
+
+    let obligations_resp = fetch(
+        transport,
+        &ApiCall::Obligations {
+            market: &market,
+            wallet: &wallet,
+        },
+        "obligations",
+    )?;
+    let obligations = kamino::parse_obligations(&obligations_resp.body)?;
+    let obligation = select_obligation(obligations, call.obligation.as_deref(), &wallet)?;
+
+    let prices_resp = fetch(transport, &ApiCall::Prices, "prices")?;
+    let prices = kamino::parse_prices(&prices_resp.body)?;
+
+    let metrics_resp = fetch(
+        transport,
+        &ApiCall::ReservesMetrics { market: &market },
+        "reserves metrics",
+    )?;
+    let metrics = kamino::parse_reserves_metrics(&metrics_resp.body)?;
+
+    let joined = join_facts(&obligation, &prices, &metrics)?;
+
+    // Same ranker and the same inputs `assess_obligation` uses, so the amounts
+    // quoted here are the amounts the alert quoted — including the
+    // `max_repay_ui` cap, because the question is "can I afford the fix I was
+    // offered", not "the uncapped one".
+    let remedies = remedy::rank(&RemedyInput {
+        borrow_usd: obligation.borrow_usd,
+        deposit_usd: obligation.deposit_usd,
+        liq_ltv: obligation.liq_ltv,
+        watch: call.config.watch_pct / 100.0,
+        debt_symbol: joined.debt_symbol.clone(),
+        debt_price: joined.debt_price,
+        collateral_symbol: joined.collateral_symbol.clone(),
+        collateral_price: joined.collateral_price,
+        max_repay_ui: call.config.max_repay_ui,
+        collateral_is_falling: false,
+    });
+
+    if remedies.is_empty() {
+        return Ok(report::render_capacity(
+            &joined.collateral_symbol,
+            &joined.debt_symbol,
+            &[],
+        ));
+    }
+
+    // The mint/token-program pair for each ATA lives only in the reserve
+    // account data, not in the metrics rows — same fetch `rescue` makes.
+    let account_data_resp = fetch(
+        transport,
+        &ApiCall::ReserveAccountData { market: &market },
+        "reserve account data",
+    )?;
+    let reserve_blobs = parse_reserve_account_data(&account_data_resp.body, &obligation.market)?;
+
+    let mut rows: Vec<report::CapacityRow> = Vec::new();
+    for r in &remedies {
+        let reserve = match r.kind {
+            RemedyKind::Repay => &joined.debt_row.reserve,
+            RemedyKind::Deposit => &joined.collateral_row.reserve,
+        };
+        let (symbol, held) = match reserve_blobs.get(reserve.as_str()) {
+            Some(data) => {
+                let accounts =
+                    rescue::extract_reserve_accounts(reserve, data, &obligation.market)?;
+                let held = wallet_balance_ui(
+                    transport,
+                    &call.config.rpc_url,
+                    &wallet,
+                    &accounts.liquidity_mint,
+                    &accounts.token_program,
+                );
+                (
+                    match r.kind {
+                        RemedyKind::Repay => joined.debt_symbol.clone(),
+                        RemedyKind::Deposit => joined.collateral_symbol.clone(),
+                    },
+                    held,
+                )
+            }
+            // A reserve missing from the account blob leaves the balance
+            // unknown rather than failing the whole answer: the other remedy
+            // may still be affordable and worth reporting.
+            None => (
+                match r.kind {
+                    RemedyKind::Repay => joined.debt_symbol.clone(),
+                    RemedyKind::Deposit => joined.collateral_symbol.clone(),
+                },
+                None,
+            ),
+        };
+        rows.push(report::CapacityRow {
+            is_repay: r.kind == RemedyKind::Repay,
+            symbol,
+            needs_ui: r.needs_balance_ui,
+            held_ui: held,
+            resulting_buffer: r.resulting_buffer,
+            capped_by_max_repay: r.capped_by_max_repay,
+        });
+    }
+
+    Ok(report::render_capacity(
+        &joined.collateral_symbol,
+        &joined.debt_symbol,
+        &rows,
+    ))
+}
+
 fn run_portfolio(call: &ParsedCall, transport: &mut dyn Transport) -> Result<String, String> {
     let wallet = resolve_wallet(call)?;
 
@@ -754,21 +904,13 @@ fn run_rescue(call: &ParsedCall, transport: &mut dyn Transport) -> Result<String
     // never pre-applied to `computed_delta_ui` — so when it's the binding
     // constraint, the label truthfully says `"balance"` instead of
     // `"computed"`.
-    let mut balance_ui: Option<f64> = None;
-    if let Ok(ata) = rescue::derive_ata(
+    let balance_ui = wallet_balance_ui(
+        transport,
+        &call.config.rpc_url,
         &wallet,
         &repay_accounts.liquidity_mint,
         &repay_accounts.token_program,
-    ) {
-        let balance_req = net::rpc_get_token_account_balance(&call.config.rpc_url, &ata);
-        if let Ok(balance_resp) = transport.fetch(&balance_req) {
-            if net::check_response(&balance_resp).is_ok() {
-                if let Ok(ui) = net::parse_token_balance_response(&balance_resp.body) {
-                    balance_ui = Some(ui);
-                }
-            }
-        }
-    }
+    );
 
     // amount_native = min(computed repay Δ, requested repay_ui_amount,
     // max_repay_ui, wallet balance) — spec safety invariant 4. `capped_by`
@@ -965,21 +1107,13 @@ fn run_deposit(call: &ParsedCall, transport: &mut dyn Transport) -> Result<Strin
 
     // Optional wallet-balance cap: best-effort only, same mechanism as
     // `run_rescue`'s (F7-style truthful `capped_by` label).
-    let mut balance_ui: Option<f64> = None;
-    if let Ok(ata) = rescue::derive_ata(
+    let balance_ui = wallet_balance_ui(
+        transport,
+        &call.config.rpc_url,
         &wallet,
         &deposit_accounts.liquidity_mint,
         &deposit_accounts.token_program,
-    ) {
-        let balance_req = net::rpc_get_token_account_balance(&call.config.rpc_url, &ata);
-        if let Ok(balance_resp) = transport.fetch(&balance_req) {
-            if net::check_response(&balance_resp).is_ok() {
-                if let Ok(ui) = net::parse_token_balance_response(&balance_resp.body) {
-                    balance_ui = Some(ui);
-                }
-            }
-        }
-    }
+    );
 
     // amount_native = min(computed deposit Δ, requested deposit_ui_amount,
     // max_deposit_ui, wallet balance) — mirrors `run_rescue`'s safety

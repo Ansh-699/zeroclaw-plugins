@@ -20,6 +20,7 @@ pub enum Action {
     Portfolio,
     Rescue,
     Deposit,
+    Capacity,
 }
 
 /// A parsed, validated tool call: the seven execute-args fields plus the
@@ -66,6 +67,7 @@ pub fn parse_call(raw_json: &str) -> Result<ParsedCall, String> {
         Some("portfolio") => Action::Portfolio,
         Some("rescue") => Action::Rescue,
         Some("deposit") => Action::Deposit,
+        Some("capacity") => Action::Capacity,
         Some(_) => return Err("invalid value for 'action'".to_string()),
         None => return Err("missing required field 'action'".to_string()),
     };

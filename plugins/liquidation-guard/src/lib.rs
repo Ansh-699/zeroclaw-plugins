@@ -73,7 +73,7 @@ mod component {
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["check", "portfolio", "rescue", "deposit"],
+                        "enum": ["check", "portfolio", "rescue", "deposit", "capacity"],
                         "description": "Which guard operation to run."
                     },
                     "wallet": {
@@ -119,7 +119,12 @@ mod component {
             let action = serde_json::from_str::<serde_json::Value>(&args)
                 .ok()
                 .and_then(|v| v.get("action").and_then(|a| a.as_str()).map(str::to_string))
-                .filter(|a| matches!(a.as_str(), "check" | "portfolio" | "rescue" | "deposit"))
+                .filter(|a| {
+                    matches!(
+                        a.as_str(),
+                        "check" | "portfolio" | "rescue" | "deposit" | "capacity"
+                    )
+                })
                 .unwrap_or_else(|| "invalid".to_string());
             emit(
                 LogLevel::Info,
