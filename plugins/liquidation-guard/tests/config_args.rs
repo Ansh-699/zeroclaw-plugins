@@ -225,7 +225,7 @@ fn injected_rpc_url_arg_rejected() {
 /// will make and always fail.
 #[test]
 fn every_advertised_action_parses() {
-    for action in ["check", "portfolio", "rescue", "deposit", "capacity"] {
+    for action in ["check", "portfolio", "rescue", "deposit", "capacity", "stress"] {
         let raw = format!(r#"{{"action":"{action}"}}"#);
         assert!(
             parse_call(&raw).is_ok(),
@@ -246,6 +246,30 @@ fn bad_length_base58_arg_rejected() {
     let raw = r#"{"action":"check","wallet":"abc"}"#;
     let err = parse_call(raw).unwrap_err();
     assert!(err.contains("wallet"));
+}
+
+#[test]
+fn price_delta_pct_accepts_negative_and_positive() {
+    for v in [-30.0, -0.1, 0.0, 5.0, 500.0] {
+        let raw = format!(r#"{{"action":"stress","price_delta_pct":{v}}}"#);
+        assert!(parse_call(&raw).is_ok(), "{v} should be accepted");
+    }
+}
+
+#[test]
+fn price_delta_pct_rejects_at_or_below_negative_100() {
+    for v in [-100.0, -150.0] {
+        let raw = format!(r#"{{"action":"stress","price_delta_pct":{v}}}"#);
+        let err = parse_call(&raw).unwrap_err();
+        assert!(err.contains("price_delta_pct"), "{v}: {err}");
+    }
+}
+
+#[test]
+fn price_delta_pct_rejects_non_finite() {
+    let raw = r#"{"action":"stress","price_delta_pct":"nan"}"#;
+    let err = parse_call(raw).unwrap_err();
+    assert!(err.contains("price_delta_pct"));
 }
 
 #[test]

@@ -21,6 +21,7 @@ pub enum Action {
     Rescue,
     Deposit,
     Capacity,
+    Stress,
 }
 
 /// A parsed, validated tool call: the seven execute-args fields plus the
@@ -34,10 +35,13 @@ pub struct ParsedCall {
     pub repay_ui_amount: Option<f64>,
     pub deposit_ui_amount: Option<f64>,
     pub prev_snapshot: Option<String>,
+    /// `stress` only: collateral price shock, percent (negative = a drop).
+    /// `None` -> the plugin's own default shock set.
+    pub price_delta_pct: Option<f64>,
     pub config: Config,
 }
 
-const ALLOWED_FIELDS: [&str; 8] = [
+const ALLOWED_FIELDS: [&str; 9] = [
     "action",
     "wallet",
     "market",
@@ -45,6 +49,7 @@ const ALLOWED_FIELDS: [&str; 8] = [
     "repay_ui_amount",
     "deposit_ui_amount",
     "prev_snapshot",
+    "price_delta_pct",
     "__config",
 ];
 
@@ -68,6 +73,7 @@ pub fn parse_call(raw_json: &str) -> Result<ParsedCall, String> {
         Some("rescue") => Action::Rescue,
         Some("deposit") => Action::Deposit,
         Some("capacity") => Action::Capacity,
+        Some("stress") => Action::Stress,
         Some(_) => return Err("invalid value for 'action'".to_string()),
         None => return Err("missing required field 'action'".to_string()),
     };
@@ -85,6 +91,24 @@ pub fn parse_call(raw_json: &str) -> Result<ParsedCall, String> {
         Some(_) => return Err("invalid value for 'prev_snapshot'".to_string()),
     };
 
+    let price_delta_pct = match obj.get("price_delta_pct") {
+        Some(Value::Null) | None => None,
+        Some(v) => {
+            let n = v
+                .as_f64()
+                .ok_or_else(|| "invalid value for 'price_delta_pct'".to_string())?;
+            // > -100: a price cannot fall to or below zero. No upper bound
+            // beyond finiteness — an operator asking "what if it 5x'd" is a
+            // valid (if uninteresting) question, not a malformed one.
+            if !(n.is_finite() && n > -100.0) {
+                return Err(
+                    "invalid value for 'price_delta_pct': must be finite and > -100".to_string(),
+                );
+            }
+            Some(n)
+        }
+    };
+
     let config_map: HashMap<String, String> = match obj.get("__config") {
         Some(v) => serde_json::from_value(v.clone())
             .map_err(|_| "invalid value for '__config'".to_string())?,
@@ -100,6 +124,7 @@ pub fn parse_call(raw_json: &str) -> Result<ParsedCall, String> {
         repay_ui_amount,
         deposit_ui_amount,
         prev_snapshot,
+        price_delta_pct,
         config,
     })
 }

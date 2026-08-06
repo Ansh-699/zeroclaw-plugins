@@ -63,7 +63,7 @@ fn safe_div(numerator: f64, denominator: f64) -> f64 {
 /// outstanding debt" verdict, on the same report. Infinity is the honest
 /// value: it renders as `n/a` rather than a fabricated number, and matches how
 /// `kamino::map_obligation` reports exactly this state.
-fn simulate(borrow_usd: f64, deposit_usd: f64, liq_ltv: f64) -> (f64, f64) {
+pub(crate) fn simulate(borrow_usd: f64, deposit_usd: f64, liq_ltv: f64) -> (f64, f64) {
     let ltv = if deposit_usd != 0.0 {
         borrow_usd / deposit_usd
     } else if borrow_usd > 0.0 {

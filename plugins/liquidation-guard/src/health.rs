@@ -92,7 +92,7 @@ pub struct HealthReport {
     pub correlated_move_assumption: bool,
 }
 
-fn tier_for(buffer: f64, t: &Thresholds) -> Tier {
+pub(crate) fn tier_for(buffer: f64, t: &Thresholds) -> Tier {
     if buffer >= t.watch {
         Tier::Ok
     } else if buffer >= t.warn {

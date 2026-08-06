@@ -307,9 +307,31 @@ fn rescue_contains_tx_amount_cap_and_snapshot_last() {
 fn render_portfolio_joins_sections() {
     let a = render_check(&meta(), &health(), &[], "snap-a");
     let b = render_check(&meta(), &health(), &[], "snap-b");
-    let joined = render_portfolio(&[a.clone(), b.clone()]);
+    let joined = render_portfolio(&[
+        (0.05, "ObligationA111111111111111111111111111111".to_string(), a.clone()),
+        (0.20, "ObligationB222222222222222222222222222222".to_string(), b.clone()),
+    ]);
     assert!(joined.contains(&a));
     assert!(joined.contains(&b));
+}
+
+/// The whole point of ranking: the header names whichever obligation the
+/// caller put first, not whichever happens to sort alphabetically or was
+/// fetched first -- so this pins the header to the FIRST row, independent of
+/// what "worse" means (that's decided by the caller's sort, not this fn).
+#[test]
+fn render_portfolio_header_names_the_first_row() {
+    let a = render_check(&meta(), &health(), &[], "snap-a");
+    let b = render_check(&meta(), &health(), &[], "snap-b");
+    let out = render_portfolio(&[
+        (0.05, "HcrU9nyaBFmhNPrxnwXRjreVxdQTZdq2dpvktjsWiS4J".to_string(), a),
+        (0.20, "SomeOtherObligation1111111111111111111111".to_string(), b),
+    ]);
+    assert!(
+        out.starts_with("Worst first: HcrU9nya"),
+        "header must name the first (worst) row: {out}"
+    );
+    assert!(out.contains("buffer 5.0%"), "header must state that row's buffer: {out}");
 }
 
 /// Hostile symbol strings from payloads are inert display data: no

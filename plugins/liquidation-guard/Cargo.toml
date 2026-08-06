@@ -1,6 +1,6 @@
 [package]
 name = "liquidation-guard"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "ZeroClaw WIT plugin: Kamino Lend health guard with unsigned repay and deposit rescue transactions."

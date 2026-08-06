@@ -87,8 +87,15 @@ fn run_inner(raw_args: &str, transport: &mut dyn Transport) -> Result<String, St
         Action::Rescue => run_rescue(&call, transport),
         Action::Deposit => run_deposit(&call, transport),
         Action::Capacity => run_capacity(&call, transport),
+        Action::Stress => run_stress(&call, transport),
     }
 }
+
+/// Default shock set for `stress` when the caller doesn't name one: a
+/// small, medium, and large collateral-price drop. Chosen to bracket the
+/// thresholds a `guard` risk profile typically configures (WATCH 25 / WARN
+/// 15 / CRITICAL 7), not to model any particular market's volatility.
+const DEFAULT_STRESS_SHOCKS_PCT: [f64; 3] = [-10.0, -20.0, -30.0];
 
 /// Best-effort wallet balance for one mint, in ui units.
 ///
@@ -719,6 +726,87 @@ fn run_capacity(call: &ParsedCall, transport: &mut dyn Transport) -> Result<Stri
     ))
 }
 
+/// `stress` — what happens to this position at a hypothetical collateral
+/// price?
+///
+/// Pure arithmetic over the same three fetches `check` already makes — no
+/// price-history feed, no additional RPC method, no transaction. Shocks
+/// `deposit_usd` by the requested percentage (collateral value scales
+/// linearly with its price; `borrow_usd` is left alone, i.e. this models a
+/// collateral-price move, not a debt-price move) and re-runs the same
+/// `remedy::simulate` math `check`'s own remedies are sized from.
+fn run_stress(call: &ParsedCall, transport: &mut dyn Transport) -> Result<String, String> {
+    let wallet = resolve_wallet(call)?;
+    let market = resolve_market(call);
+
+    let obligations_resp = fetch(
+        transport,
+        &ApiCall::Obligations {
+            market: &market,
+            wallet: &wallet,
+        },
+        "obligations",
+    )?;
+    let obligations = kamino::parse_obligations(&obligations_resp.body)?;
+    let obligation = select_obligation(obligations, call.obligation.as_deref(), &wallet)?;
+
+    let prices_resp = fetch(transport, &ApiCall::Prices, "prices")?;
+    let prices = kamino::parse_prices(&prices_resp.body)?;
+
+    let metrics_resp = fetch(
+        transport,
+        &ApiCall::ReservesMetrics { market: &market },
+        "reserves metrics",
+    )?;
+    let metrics = kamino::parse_reserves_metrics(&metrics_resp.body)?;
+
+    let joined = join_facts(&obligation, &prices, &metrics)?;
+
+    let thresholds = health::Thresholds {
+        watch: call.config.watch_pct / 100.0,
+        warn: call.config.warn_pct / 100.0,
+        critical: call.config.critical_pct / 100.0,
+    };
+
+    let shocks: Vec<f64> = match call.price_delta_pct {
+        Some(p) => vec![p],
+        None => DEFAULT_STRESS_SHOCKS_PCT.to_vec(),
+    };
+
+    let rows: Vec<report::StressRow> = shocks
+        .iter()
+        .map(|&shock_pct| {
+            let shocked_price = joined.collateral_price * (1.0 + shock_pct / 100.0);
+            let shocked_deposit_usd = obligation.deposit_usd * (1.0 + shock_pct / 100.0);
+            let (_, buffer) = remedy::simulate(obligation.borrow_usd, shocked_deposit_usd, obligation.liq_ltv);
+            report::StressRow {
+                shock_pct,
+                shocked_price,
+                tier: health::tier_for(buffer, &thresholds),
+                buffer,
+            }
+        })
+        .collect();
+
+    // The drop that reaches liquidation exactly (buffer == 0): the
+    // deposit_usd at which borrow_usd / deposit_usd == liq_ltv.
+    // `liq_ltv == 0` degrades to `None`, same fail-closed rule
+    // `health::assess`'s own forecasts use rather than a divide-by-zero.
+    let liquidation_shock_pct = if obligation.liq_ltv != 0.0 && obligation.deposit_usd != 0.0 {
+        let deposit_usd_at_liq = obligation.borrow_usd / obligation.liq_ltv;
+        Some((deposit_usd_at_liq / obligation.deposit_usd - 1.0) * 100.0)
+    } else {
+        None
+    };
+
+    Ok(report::render_stress(
+        &joined.collateral_symbol,
+        joined.collateral_price,
+        &rows,
+        liquidation_shock_pct,
+    ))
+}
+
 fn run_portfolio(call: &ParsedCall, transport: &mut dyn Transport) -> Result<String, String> {
     let wallet = resolve_wallet(call)?;
 
@@ -730,7 +818,11 @@ fn run_portfolio(call: &ParsedCall, transport: &mut dyn Transport) -> Result<Str
         .map(kamino::http_date_to_unix)
         .transpose()?;
 
-    let mut sections = Vec::new();
+    // (buffer, obligation id, rendered section). Buffer computed the same
+    // way `health::assess` derives it, directly from the obligation's own
+    // ltv/liq_ltv -- so the ranking always agrees with what each section's
+    // own first line reports, without parsing that line back out.
+    let mut ranked: Vec<(f64, String, String)> = Vec::new();
     for market in &call.config.markets {
         let obligations_resp = fetch(
             transport,
@@ -751,21 +843,28 @@ fn run_portfolio(call: &ParsedCall, transport: &mut dyn Transport) -> Result<Str
         )?;
         let metrics = kamino::parse_reserves_metrics(&metrics_resp.body)?;
         for obligation in &obligations {
-            sections.push(assess_obligation(
+            let buffer = if obligation.liq_ltv == 0.0 {
+                0.0
+            } else {
+                (obligation.liq_ltv - obligation.ltv) / obligation.liq_ltv
+            };
+            let rendered = assess_obligation(
                 obligation,
                 &prices,
                 &metrics,
                 now_unix,
                 &call.config,
                 call.prev_snapshot.as_deref(),
-            )?);
+            )?;
+            ranked.push((buffer, obligation.obligation.clone(), rendered));
         }
     }
 
-    if sections.is_empty() {
+    if ranked.is_empty() {
         return Err("no obligations found across configured markets".to_string());
     }
-    Ok(report::render_portfolio(&sections))
+    ranked.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    Ok(report::render_portfolio(&ranked))
 }
 
 /// Parses a `/kamino-market/reserves/account-data` response body — an

@@ -73,7 +73,7 @@ mod component {
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["check", "portfolio", "rescue", "deposit", "capacity"],
+                        "enum": ["check", "portfolio", "rescue", "deposit", "capacity", "stress"],
                         "description": "Which guard operation to run."
                     },
                     "wallet": {
@@ -99,6 +99,10 @@ mod component {
                     "prev_snapshot": {
                         "type": "string",
                         "description": "Previous snapshot to diff against, if any."
+                    },
+                    "price_delta_pct": {
+                        "type": "number",
+                        "description": "Collateral price shock, percent, for action \"stress\" (negative = a drop). Omit to use the plugin's default shock set."
                     }
                 },
                 "required": ["action"],
@@ -122,7 +126,7 @@ mod component {
                 .filter(|a| {
                     matches!(
                         a.as_str(),
-                        "check" | "portfolio" | "rescue" | "deposit" | "capacity"
+                        "check" | "portfolio" | "rescue" | "deposit" | "capacity" | "stress"
                     )
                 })
                 .unwrap_or_else(|| "invalid".to_string());

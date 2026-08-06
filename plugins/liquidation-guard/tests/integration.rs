@@ -315,6 +315,79 @@ fn capacity_builds_no_transaction() {
     );
 }
 
+fn stress_args(config: serde_json::Value, extra: serde_json::Value) -> String {
+    let mut obj = serde_json::json!({
+        "action": "stress",
+        "wallet": WALLET,
+        "__config": config,
+    });
+    if let (Some(o), Some(e)) = (obj.as_object_mut(), extra.as_object()) {
+        for (k, v) in e {
+            o.insert(k.clone(), v.clone());
+        }
+    }
+    obj.to_string()
+}
+
+/// No `price_delta_pct` -> the plugin's own default shock set (three rows),
+/// each naming the tier that shock lands on.
+#[test]
+fn stress_default_shocks_bracket_thresholds() {
+    let mut t = rescue_transport(1_000_000.0);
+    let out = run(&stress_args(serde_json::json!({}), serde_json::json!({})), &mut t);
+    assert!(out.success, "expected success, got: {}", out.text);
+    for pct in ["-10.0%", "-20.0%", "-30.0%"] {
+        assert!(out.text.contains(pct), "missing shock row {pct}: {}", out.text);
+    }
+    assert!(
+        out.text.contains("Liquidates at a"),
+        "missing the exact liquidating move: {}",
+        out.text
+    );
+}
+
+/// An explicit `price_delta_pct` replaces the default set with exactly one
+/// row at that shock.
+#[test]
+fn stress_explicit_delta_replaces_defaults() {
+    let mut t = rescue_transport(1_000_000.0);
+    let out = run(
+        &stress_args(serde_json::json!({}), serde_json::json!({"price_delta_pct": -5.0})),
+        &mut t,
+    );
+    assert!(out.success, "expected success, got: {}", out.text);
+    assert!(out.text.contains("-5.0%"), "missing the requested shock: {}", out.text);
+    assert!(!out.text.contains("-10.0%"), "default shocks must not also appear: {}", out.text);
+    assert!(!out.text.contains("-20.0%"), "default shocks must not also appear: {}", out.text);
+}
+
+/// `stress` is read-only. It must never emit a transaction or the custody
+/// sentence that belongs to one.
+#[test]
+fn stress_builds_no_transaction() {
+    let mut t = rescue_transport(1_000_000.0);
+    let out = run(&stress_args(serde_json::json!({}), serde_json::json!({})), &mut t);
+    assert!(out.success, "expected success, got: {}", out.text);
+    assert!(
+        !out.text.contains("tx (base64)") && !out.text.contains("Nothing here can sign"),
+        "stress must not produce a transaction: {}",
+        out.text
+    );
+}
+
+/// `-100` and below is structurally rejected -- a price cannot fall to or
+/// past zero.
+#[test]
+fn stress_rejects_delta_at_or_below_negative_100() {
+    let mut t = rescue_transport(1_000_000.0);
+    let out = run(
+        &stress_args(serde_json::json!({}), serde_json::json!({"price_delta_pct": -100.0})),
+        &mut t,
+    );
+    assert!(!out.success, "expected rejection, got: {}", out.text);
+    assert!(out.text.contains("price_delta_pct"), "error must name the field: {}", out.text);
+}
+
 #[test]
 fn check_happy_path() {
     let mut t = happy_transport();
@@ -846,6 +919,26 @@ fn portfolio_happy_path() {
     assert!(
         out.text.contains("snapshot:"),
         "missing snapshot line: {}",
+        out.text
+    );
+}
+
+/// The report now leads with a ranking header naming the worst position and
+/// its buffer, computed straight from the obligation's own ltv/liq_ltv
+/// (independent of the section text below it).
+#[test]
+fn portfolio_leads_with_worst_first_header() {
+    let mut t = happy_transport();
+    let out = run(&portfolio_args(serde_json::json!({})), &mut t);
+    assert!(out.success, "expected success, got: {}", out.text);
+    assert!(
+        out.text.starts_with("Worst first: HcrU9nya"),
+        "missing ranking header: {}",
+        out.text
+    );
+    assert!(
+        out.text.contains("buffer 8.9%"),
+        "header buffer must match the fixture's own ltv/liq_ltv: {}",
         out.text
     );
 }

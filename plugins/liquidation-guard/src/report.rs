@@ -181,6 +181,51 @@ pub fn render_capacity(collateral_symbol: &str, debt_symbol: &str, rows: &[Capac
     out
 }
 
+/// One hypothetical collateral-price shock and its result.
+pub struct StressRow {
+    /// Percent, negative = a drop.
+    pub shock_pct: f64,
+    pub shocked_price: f64,
+    pub tier: Tier,
+    pub buffer: f64,
+}
+
+/// Renders the `stress` answer: the tier at each shocked price, plus the
+/// exact drop that reaches liquidation. Read-only, no custody sentence — same
+/// as `capacity`, there is no transaction here.
+pub fn render_stress(
+    collateral_symbol: &str,
+    current_price: f64,
+    rows: &[StressRow],
+    liquidation_shock_pct: Option<f64>,
+) -> String {
+    let mut out = format!(
+        "Stress test — {collateral_symbol} at ${current}:\n",
+        current = amt(current_price)
+    );
+    for r in rows {
+        out.push_str(&format!(
+            "{shock:+.1}% → {sym} ${price} — {tier} (buffer {buf})\n",
+            shock = r.shock_pct,
+            sym = collateral_symbol,
+            price = amt(r.shocked_price),
+            tier = tier_name(&r.tier),
+            buf = pct(r.buffer),
+        ));
+    }
+    match liquidation_shock_pct {
+        Some(p) if p < 0.0 => out.push_str(&format!(
+            "Liquidates at a {p:.1}% move (${liq}).\n",
+            liq = amt(current_price * (1.0 + p / 100.0))
+        )),
+        // A non-negative value means the position is already at/through the
+        // liquidation LTV at the CURRENT price -- not a future shock at all.
+        Some(_) => out.push_str("Already at or past the liquidation LTV at the current price.\n"),
+        None => out.push_str("Liquidation threshold undefined for this position (no liquidatable deposit).\n"),
+    }
+    out
+}
+
 /// Custody invariant: rescue/deposit output always carries this sentence
 /// verbatim — the single copy both [`render_rescue`] and [`render_deposit`]
 /// reference (never duplicated as a second string literal).
@@ -228,7 +273,7 @@ fn amt(v: f64) -> String {
     }
 }
 
-fn tier_name(t: &Tier) -> &'static str {
+pub(crate) fn tier_name(t: &Tier) -> &'static str {
     match t {
         Tier::Ok => "OK",
         Tier::Watch => "WATCH",
@@ -396,8 +441,20 @@ pub fn render_check(
 }
 
 /// Join per-obligation `render_check` renders into one portfolio result.
-pub fn render_portfolio(sections: &[String]) -> String {
-    sections.join("\n\n")
+/// `(buffer, obligation id, rendered section)`, already sorted buffer
+/// ascending by the caller — most dangerous first.
+pub fn render_portfolio(ranked: &[(f64, String, String)]) -> String {
+    let header = ranked
+        .first()
+        .map(|(buffer, obligation, _)| {
+            let short = obligation
+                .get(..8)
+                .unwrap_or(obligation.as_str());
+            format!("Worst first: {short}… — buffer {}%\n\n", pct(*buffer))
+        })
+        .unwrap_or_default();
+    let sections: Vec<&str> = ranked.iter().map(|(_, _, s)| s.as_str()).collect();
+    header + &sections.join("\n\n")
 }
 
 /// Render the `rescue` result: custody sentence, unsigned tx, amount, cap
